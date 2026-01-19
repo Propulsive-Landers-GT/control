@@ -9,6 +9,7 @@ use ndarray::ArrayView1;
 use optimization_engine::{panoc::*, *};
 use std::time::Instant;
 
+// a simple internal dynamics function for the mpc
 pub fn dynamics(x: &Array1<f64>, u: &Array1<f64>) -> Array1<f64> {
     // let mut x_next = Array1::<f64>::zeros(x.len());
     // Constants
@@ -46,9 +47,12 @@ pub fn dynamics(x: &Array1<f64>, u: &Array1<f64>) -> Array1<f64> {
 
     // Thrust direction in body frame
     let tx = gimbal_theta.sin() * gimbal_phi.cos();
-    let ty = gimbal_phi.sin();
+    let ty = gimbal_phi.sin() * gimbal_theta.cos();
     let tz = gimbal_theta.cos() * gimbal_phi.cos();
-    let thrust_b = Array1::from(vec![tx * thrust, ty * thrust, tz * thrust]);
+
+    // normalize thrust vector
+    let norm = (tx * tx + ty * ty + tz * tz).sqrt().max(1e-8);
+    let thrust_b = Array1::from(vec![tx * thrust / norm, ty * thrust / norm, tz * thrust / norm]);
 
     // Quaternion normalization
     let mut q = Array1::from(vec![qx, qy, qz, qw]);
@@ -87,11 +91,21 @@ pub fn dynamics(x: &Array1<f64>, u: &Array1<f64>) -> Array1<f64> {
 
     // Angular velocity
     let omega = Array1::from(vec![wx, wy, wz]);
-    let omega_cross_i_omega = Array1::from(vec![
-        omega[1] * (iyy * omega[2]) - omega[2] * (izz * omega[1]),
-        omega[2] * (izz * omega[0]) - omega[0] * (ixx * omega[2]),
-        omega[0] * (ixx * omega[1]) - omega[1] * (iyy * omega[0]),
+
+    // First compute Iω
+    let i_omega = Array1::from(vec![
+        ixx * omega[0],
+        iyy * omega[1],
+        izz * omega[2],
     ]);
+
+    // Then compute ω × (Iω)
+    let omega_cross_i_omega = Array1::from(vec![
+        omega[1] * i_omega[2] - omega[2] * i_omega[1],
+        omega[2] * i_omega[0] - omega[0] * i_omega[2],
+        omega[0] * i_omega[1] - omega[1] * i_omega[0],
+    ]);
+    
     let omega_dot = i_inv.dot(&(torque_b - omega_cross_i_omega));
 
     // Quaternion derivative
@@ -495,6 +509,8 @@ pub fn OpEnSolve(
         let u_view = ArrayView1::from(u_slice);
         let smooth_cost = smoothing_cost(&u_view.to_owned(), smoothing_weight, m);
         *cost = QP_cost(&H, &g, &u_view.to_owned()) + smooth_cost;
+        //display cost
+        // println!("Cost: {}", *cost);
         Ok(())
     };
 
@@ -518,7 +534,7 @@ pub fn OpEnSolve(
 
     // Problem and optimizer (reuse cache)
     let problem = Problem::new(&bounds, df, f);
-    let mut panoc = PANOCOptimizer::new(problem, panoc_cache).with_max_iter(150);
+    let mut panoc = PANOCOptimizer::new(problem, panoc_cache).with_max_iter(200);
 
     // Initial guess flattened from U
     let mut u_init_flat: Vec<f64> = Vec::with_capacity(n_dim_u);
@@ -526,9 +542,18 @@ pub fn OpEnSolve(
         u_init_flat.extend_from_slice(U[k].as_slice().unwrap());
     }
 
-    // Solve
-    let _status = panoc.solve(&mut u_init_flat).unwrap();
-    println!("OpEn QP solve frequency: {:?}Hz, After {:?} iterations", 1.0 / _status.solve_time().as_secs_f64(), _status.iterations());
+    // Solve (handle errors gracefully to avoid panic)
+    let solve_result = panoc.solve(&mut u_init_flat);
+    if let Ok(status) = &solve_result {
+        println!(
+            "OpEn QP solve frequency: {:?}Hz, After {:?} iterations",
+            1.0 / status.solve_time().as_secs_f64(),
+            status.iterations()
+        );
+    } else if let Err(err) = &solve_result {
+        eprintln!("PANOC solve failed: {:?}. Keeping current control sequence.", err);
+        // u_init_flat remains the initial flattened U; proceed without updates
+    }
 
     // Return first control and full sequence reshaped
     let u_seq = Array1::from(u_init_flat);
