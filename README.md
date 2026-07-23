@@ -4,7 +4,7 @@ Vehicle-agnostic **control algorithms** for GT Propulsive Landers — the contro
 designs and studies that can be tuned and dropped into any GTPL vehicle.
 
 > **Provenance:** Reorganized **by function** in July 2026 from the monolithic
-> [`Propulsive-Landers-GT/MonopropUAV`](https://github.com/Propulsive-Landers-GT/MonopropUAV)
+> [`GTPL-Testing/MonopropUAV`](https://github.com/GTPL-Testing/MonopropUAV)
 > repo. These were previously scattered across `Algorithms/` and
 > `Sensing&Controls/Controllers/`. Full commit history is preserved. See the
 > [GTPL-test root README](../README.md) for the full mapping.
