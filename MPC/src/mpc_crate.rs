@@ -341,7 +341,8 @@ fn build_Su(A_seq: &Vec<Array2<f64>>, B_seq: &Vec<Array2<f64>>) -> Array2<f64> {
             let mut Phi = Array2::<f64>::eye(n);
             if j + 1 <= k {
                 for t in (j+1)..=k {
-                    Phi = Phi.dot(&A_seq[t]);
+                    // Later transitions act on the left: A[k] ... A[j+1].
+                    Phi = A_seq[t].dot(&Phi);
                 }
             }
             let block = Phi.dot(&B_seq[j]);
@@ -509,6 +510,15 @@ fn nmpc_step(x0: &Array1<f64>, U_init: &Vec<Array1<f64>>, xref_traj: &Vec<Array1
     // initialize xs trajectory
     let mut xs = vec![Array1::<f64>::zeros(x0.len()); N + 1];
     let mut U = U_init.clone();
+    // Reference resets and external callers may supply infeasible warm starts.
+    // Project before the first rollout, including zero-iteration/failure paths.
+    for u in &mut U {
+        for i in 0..m { u[i] = u[i].max(u_min[i]).min(u_max[i]); }
+    }
+    if std::env::var_os("GTPL_CONSTRAINT_DIAGNOSTICS").is_some() {
+        let correction = U.iter().zip(U_init).flat_map(|(a,b)| a.iter().zip(b).map(|(x,y)| (x-y).abs())).fold(0.0_f64,f64::max);
+        eprintln!("MPC warm_projection_max={correction}");
+    }
     let start_time = Instant::now();
     for _ in 0..sqp_iters {
         xs = rollout(x0, &U, mass, moi, dt);
@@ -556,6 +566,11 @@ fn nmpc_step(x0: &Array1<f64>, U_init: &Vec<Array1<f64>>, xref_traj: &Vec<Array1
     let duration = start_time.elapsed();
     println!("PGD solve frequency {:?}Hz", 1.0 / duration.as_secs_f64());
 
+    if std::env::var_os("GTPL_CONSTRAINT_DIAGNOSTICS").is_some() {
+        let violation = U.iter().flat_map(|u| (0..m).map(move |i| (u_min[i]-u[i]).max(u[i]-u_max[i]).max(0.0))).fold(0.0_f64,f64::max);
+        let jump = U.windows(2).flat_map(|w| (0..2).map(move |i| (w[1][i]-w[0][i]).abs())).fold(0.0_f64,f64::max);
+        eprintln!("MPC final_absolute_violation={violation} horizon_gimbal_jump_rad={jump}");
+    }
     (U, xs)
 }
 
@@ -736,3 +751,32 @@ pub fn mpc_main(x: &Array1<f64>, U_warm: &mut Vec<Array1<f64>>, xref_traj: &Vec<
     // Note that x_new will not be used in the real implementation. Filtered sensor data will provide the next state.
     (U_warm.clone(), x_new, u_apply)
 }
+
+#[cfg(test)]
+mod constraint_tests {
+ use super::*;
+ #[test]
+ fn pgd_projects_initial_and_final_delta() {
+  let h=Array2::eye(3); let g=Array1::from(vec![-100.0,100.0,0.0]);
+  let lo=Array1::from(vec![-0.2,-0.2,-1.0]); let hi=-&lo;
+  for iters in [0,20] {
+   let u=solve_qp_pgd(&h,&g,&lo,&hi,&Array1::from(vec![9.0,-9.0,8.0]),iters,1.0);
+   for i in 0..3 { assert!(u[i]>=lo[i] && u[i]<=hi[i]); }
+  }
+ }
+ #[test]
+ fn zero_iteration_warm_start_is_projected() {
+  let mut x=Array1::zeros(13); x[6]=1.0;
+  let u=vec![Array1::from(vec![1.0,-1.0,0.0]);2];
+  let lo=Array1::from(vec![-0.261799,-0.261799,300.0]);
+  let hi=Array1::from(vec![0.261799,0.261799,1200.0]);
+  let (out,_)=nmpc_step(&x,&u,&vec![x.clone();3],&Array2::eye(13),&Array2::eye(3),&Array2::eye(13),&lo,&hi,0,1.0,80.0,&Array2::eye(3),0.2);
+  for v in out { assert_eq!(v,Array1::from(vec![hi[0],lo[1],lo[2]])); }
+ }
+}
+
+#[cfg(test)]
+mod sensitivity_tests;
+
+#[cfg(test)]
+mod cost_diagnostics;
